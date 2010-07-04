@@ -1,56 +1,81 @@
 require 'openssl'
-@@traffic = []
-class TCPSocket
+require 'yajl'
 
+TRAFFIC = []
+
+class TCPSocket
   alias_method :orig_write, :write
+  alias_method :orig_sysread, :sysread
+end
+
+module TCPSocketRecordOverrides
   def write(str)
-    @@traffic << ["write", str]
+    TRAFFIC << ["write", str]
     orig_write(str)
   end
 
-  alias_method :orig_sysread, :sysread
   def sysread(*args)
     output = orig_sysread(*args)
-    @@traffic << ["gets", output]
+    TRAFFIC << ["gets", output]
     output
+  end
+end
+
+module TCPSocketPlaybackOverrides
+  def write(str)
+    TRAFFIC.shift[1].length
+  end
+
+  def sysread(*args)
+    TRAFFIC.shift[1]
   end
 end
 
 module Macaw
   module Methods
-    def macaw(host, port) 
+    def macaw(name, &block)
       if ENV["MACAW"] then
-        Socket.send(:alias_method, :orig_write, :write)
-        Socket.send(:alias_method, :orig_sysread, :sysread)
-        #Socket.extend(SocketOverrides)
-=begin
-        ::OpenSSL::SSL::SSLSocket.send(:alias_method, :orig_print, :print)
-        ::OpenSSL::SSL::SSLSocket.send(:alias_method, :orig_gets, :gets)
-        ::OpenSSL::SSL::SSLSocket.send(:alias_method, :orig_read, :read)
-=end
-        yield host, port
+        record(name, block)
       else
-        yield "localhost", 5200
+        playback(name, block)
+      end
+    end
+
+  private
+    def record(name, block)
+      TCPSocket.send(:include, TCPSocketRecordOverrides)
+      block.call
+      File.open("test/#{name}.json", "w") do |f|
+        Yajl::Encoder.encode(TRAFFIC, f)
+      end
+    end
+
+    def playback(name, block)
+      if File.exist?("test/#{name}.json")
+        TRAFFIC.concat Yajl::Parser.new.parse(File.new("test/#{name}.json", "r"))
+        TCPSocket.send(:include, TCPSocketPlaybackOverrides)
+        block.call
+      else
+        record(name, block)
       end
     end
   end
 
-
   module OpenSSLOverrides
     def print(str)
-      @@traffic << ["print", str]
+      TRAFFIC << ["print", str]
       orig_print(str)
     end
 
     def gets(*args)
       output = orig_gets(*args)
-      @@traffic << ["gets", output]
+      TRAFFIC << ["gets", output]
       output
     end
 
     def read(str)
       output = orig_read(str)
-      @@traffic << ["read", output]
+      TRAFFIC << ["read", output]
       output
     end
   end
